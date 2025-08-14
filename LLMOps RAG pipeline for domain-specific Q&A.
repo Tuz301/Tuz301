@@ -1,0 +1,162 @@
+# Power BI RAG Homework Helper (TF-IDF retriever + LLM generator example)
+# Drop this script into a Power BI Python visual. Add Docs (doc_id,title,text) and Query (question) to the visual's fields.
+
+import os
+import pandas as pd
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Optional LLM client (OpenAI example)
+try:
+    import openai
+except Exception:
+    openai = None
+
+# ------------ Parameters ------------
+TOP_K = 3                         # number of top documents to retrieve
+SNIPPET_LEN = 400                 # how many characters to include per doc in prompt
+OPENAI_MODEL = "gpt-4o-mini"      # replace with desired model/endpoint
+# ------------------------------------
+
+# 'dataset' is provided by Power BI and contains all fields added to the visual.
+# We expect the user to add the Docs table columns (doc_id,title,text) and a Query table column (question)
+# If the visual passes only a CSV path or only docs, adapt accordingly.
+
+# Safety check
+if 'dataset' not in globals():
+    # Running outside Power BI for local testing: load local CSVs (docs.csv with doc_id,title,text) and query.txt
+    try:
+        docs_df = pd.read_csv("docs.csv")
+        question = open("question.txt").read().strip()
+    except Exception:
+        raise RuntimeError("In Power BI, add Docs (doc_id,title,text) and Query(question) to the Python visual fields. "
+                           "For local testing put docs.csv and question.txt in the working folder.")
+else:
+    df = dataset.copy()  # dataset comes from Power BI
+    # heuristics: separate docs rows vs query rows by presence of columns
+    if {'doc_id', 'title', 'text'}.issubset(df.columns):
+        docs_df = df[['doc_id', 'title', 'text']].dropna(subset=['text']).drop_duplicates()
+    else:
+        # maybe user passed docs as a single column named 'text' and 'doc_id' missing
+        if 'text' in df.columns:
+            docs_df = df[['text']].rename(columns={'text':'text'}).reset_index().rename(columns={'index':'doc_id'})
+        else:
+            docs_df = pd.DataFrame(columns=['doc_id','title','text'])  # empty
+
+    # question may be present as 'question' column - choose the first non-null
+    if 'question' in df.columns:
+        qs = df['question'].dropna().unique()
+        question = qs[0] if len(qs) > 0 else ""
+    else:
+        question = ""
+
+# If no question provided, show instruction
+if not question or str(question).strip() == "":
+    result_df = pd.DataFrame([{
+        "answer": "No question provided. Add a Query(question) field to the visual or pass a question string.",
+        "sources": ""
+    }])
+    print(result_df)
+else:
+    # Basic preprocessing & chunking (if docs are long)
+    def chunk_text(text, max_chars=1000):
+        if not isinstance(text, str):
+            return []
+        text = text.strip()
+        if len(text) <= max_chars:
+            return [text]
+        # simple whitespace chunking
+        words = text.split()
+        chunks = []
+        chunk = []
+        length = 0
+        for w in words:
+            chunk.append(w)
+            length += len(w) + 1
+            if length >= max_chars:
+                chunks.append(" ".join(chunk))
+                chunk = []
+                length = 0
+        if chunk:
+            chunks.append(" ".join(chunk))
+        return chunks
+
+    # Build a flat list of chunks with references
+    chunk_rows = []
+    for idx, row in docs_df.reset_index(drop=True).iterrows():
+        doc_id = row.get('doc_id', f'doc_{idx}')
+        title = row.get('title', "")
+        text = row.get('text', "") or ""
+        chunks = chunk_text(text, max_chars=800)
+        for i, c in enumerate(chunks):
+            chunk_rows.append({'doc_id': doc_id, 'title': title, 'chunk_id': f"{doc_id}__{i}", 'text': c})
+
+    if len(chunk_rows) == 0:
+        result_df = pd.DataFrame([{
+            "answer": "No documents available to search. Add Docs (doc_id,title,text) to the visual or provide a docs.csv for local testing.",
+            "sources": ""
+        }])
+        print(result_df)
+    else:
+        chunks_df = pd.DataFrame(chunk_rows)
+
+        # TF-IDF retriever
+        vectorizer = TfidfVectorizer(stop_words='english', max_features=20000)
+        tfidf = vectorizer.fit_transform(chunks_df['text'].fillna(""))
+
+        q_vec = vectorizer.transform([question])
+        sims = cosine_similarity(q_vec, tfidf).flatten()
+        top_idx = np.argsort(sims)[::-1][:TOP_K]
+        top_chunks = chunks_df.iloc[top_idx].copy()
+        top_scores = sims[top_idx]
+
+        # Prepare prompt with top chunks as evidence
+        evidence_parts = []
+        sources = []
+        for i, r in enumerate(top_chunks.itertuples(index=False)):
+            snippet = r.text[:SNIPPET_LEN].replace("\n", " ")
+            evidence_parts.append(f"[{r.doc_id}] {r.title}\n{snippet}")
+            sources.append(str(r.doc_id))
+        evidence_block = "\n\n---\n\n".join(evidence_parts)
+
+        # Fallback: if no openai available or no API key, return top snippets only
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if openai is None or not openai_api_key:
+            # Return aggregated snippets for user to read
+            aggregated = "\n\n".join([f"Source [{s}]: {t[:SNIPPET_LEN]}" for s, t in zip(top_chunks['doc_id'], top_chunks['text'])])
+            answer_text = (
+                "LLM unavailable (no OpenAI package or OPENAI_API_KEY). "
+                "Returning top relevant document snippets:\n\n" + aggregated
+            )
+            result_df = pd.DataFrame([{"answer": answer_text, "sources": ";".join(sources)}])
+            print(result_df)
+        else:
+            # Call OpenAI ChatCompletion (example). Replace with your LLM client if needed.
+            openai.api_key = openai_api_key
+            system_prompt = (
+                "You are a helpful, concise tutor. Use only the provided evidence snippets to answer the student's question. "
+                "If the evidence doesn't contain the answer, say you don't know and suggest where to look. "
+                "Cite sources using the [doc_id] tag at the end of each claim (e.g., [doc_5]). Keep explanation simple and short."
+            )
+            user_prompt = f"QUESTION:\n{question}\n\nEVIDENCE (use these only):\n{evidence_block}\n\nINSTRUCTIONS: Answer simply for a 12-year-old. Mention which sources you used in square brackets."
+            try:
+                resp = openai.ChatCompletion.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    max_tokens=450,
+                    temperature=0.1,  # low temp => more precise / less creative
+                )
+                answer_text = resp['choices'][0]['message']['content'].strip()
+            except Exception as e:
+                # LLM call failed
+                answer_text = f"LLM call failed: {e}\n\nReturning top snippets instead:\n\n" + "\n\n".join(
+                    [f"Source [{s}]: {t[:SNIPPET_LEN]}" for s, t in zip(top_chunks['doc_id'], top_chunks['text'])]
+                )
+
+            # Output DataFrame for Power BI to display
+            result_df = pd.DataFrame([{"answer": answer_text, "sources": ";".join(sources)}])
+            print(result_df)
