@@ -1,5 +1,6 @@
 # ruflo runtime state (written by the ruflo CLI, MCP server, and hooks)
 .claude-flow/
+.swarm/
 .claude/proven-config.json
 .claude/.proven-config-version
 
