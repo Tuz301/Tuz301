@@ -1,0 +1,24 @@
+{
+  "env": {
+    "RUFLO_MCP_SKIP_NPX": "1",
+    "RUFLO_HOOK_SKIP_NPX": "1"
+  },
+  "extraKnownMarketplaces": {
+    "ruflo": {
+      "source": {
+        "source": "github",
+        "repo": "ruvnet/ruflo",
+        "ref": "v3.71.1",
+        "sparsePaths": [
+          ".claude-plugin",
+          "plugins"
+        ]
+      }
+    }
+  },
+  "enabledPlugins": {
+    "ruflo-core@ruflo": true,
+    "ruflo-console@ruflo": true,
+    "ruflo-mods@ruflo": true
+  }
+}
