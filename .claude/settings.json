@@ -14,11 +14,19 @@
           "plugins"
         ]
       }
+    },
+    "higgsfield": {
+      "source": {
+        "source": "github",
+        "repo": "higgsfield-ai/skills",
+        "ref": "27000402070db19d958789d05b3b52b6f4718d7c"
+      }
     }
   },
   "enabledPlugins": {
     "ruflo-core@ruflo": true,
     "ruflo-console@ruflo": true,
-    "ruflo-mods@ruflo": true
+    "ruflo-mods@ruflo": true,
+    "higgsfield@higgsfield": true
   }
 }
